@@ -1,29 +1,41 @@
-# user_wallent_ml
-# Aave V2 Credit Scoring Engine
+# 🏦 DeFi Wallet Credit Scoring — Aave V2
 
-This project generates credit scores for wallets based on their historical transactions on the Aave V2 protocol. Scores range from 0 (very risky) to 1000 (very reliable).
+This project uses raw transaction-level data from Aave V2 to generate credit scores (0–1000) for individual wallets, based on their behavioral patterns.
 
-## 📊 Method
+### ✅ What It Does
 
-We derive behavioral features for each wallet from raw transaction data and apply a rule-based weighted scoring model. Key features used:
+- Processes user-level DeFi transactions (`deposit`, `borrow`, `repay`, etc.)
+- Engineers relevant features (activity days, tx types, liquidation risk)
+- Trains a machine learning model (Random Forest) to generate credit scores
+- Scores range from **0 (high risk)** to **1000 (safe/reliable)**
 
-- Total Transactions
-- Total Deposit Amount
-- Total Borrow Amount
-- Total Repay Amount
-- Number of Unique Transaction Types
-- Borrow/Deposit Ratio (penalized if high)
-- Repay/Borrow Ratio (rewarded if high)
+### 💡 Feature Engineering
 
-## ⚙️ Architecture
+| Feature         | Description                              |
+|----------------|------------------------------------------|
+| `total_tx`      | Total transactions by wallet             |
+| `unique_actions`| Number of unique action types            |
+| `days_active`   | Days between first and last transaction  |
+| `tx_per_day`    | Transactions per active day              |
+| `deposits`      | Number of deposit actions                |
+| `borrows`       | Number of borrow actions                 |
+| `repays`        | Number of repay actions                  |
+| `redeems`       | Number of redeemunderlying actions       |
+| `liquidations`  | Number of times wallet got liquidated    |
 
-- Input: `sample_transactions.json`
-- Output: Wallet scores CSV and distribution graph
-- Scoring: Normalized + Weighted Sum Model
-- One-Step Execution: Run `score_generator.py`
+### 🧠 Model Architecture
 
-## 📈 Scoring Logic
+- `RandomForestRegressor`: Trained on behavioral features
+- Output risk scores mapped to [0–1000] using `MinMaxScaler`
 
-```python
-score = 0.15 * total_txn + 0.2 * total_deposit + 0.25 * repay_ratio
-        - 0.1 * borrow_deposit_ratio + 0.2 * txn_types + 0.1 * avg_amount
+### 📁 Input Format
+
+Place your JSON file in `data/tx_data.json`. Each record must include:
+
+```json
+{
+  "userWallet": "0x123...",
+  "timestamp": 1688758273,
+  "action": "deposit",
+  ...
+}

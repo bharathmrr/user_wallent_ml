@@ -1,108 +1,98 @@
 import json
 import pandas as pd
+import os
 import numpy as np
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import MinMaxScaler
 import matplotlib.pyplot as plt
-import os
-
-INPUT_FILE = 'data/sample_transactions.json'
-OUTPUT_FILE = 'output/wallet_scores.csv'
-PLOT_FILE = 'output/score_distribution.png'
-
-
-def load_data(json_path):
-    with open(json_path, 'r') as f:
-        data = json.load(f)
-    print("Sample keys in first record:", data[0].keys())
-    return pd.DataFrame(data)
-
-
-def extract_amount(action_data):
-    try:
-        if isinstance(action_data, dict):
-            for key in ['amount', 'value', 'scaledAmount']:
-                if key in action_data:
-                    return float(action_data[key])
-    except:
-        return 0.0
-    return 0.0
 
 
 def engineer_features(df):
-    df['amount'] = df['actionData'].apply(extract_amount)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s", errors='coerce')
 
-    df.rename(columns={
-        'userWallet': 'user_address',
-        'action': 'event_type'
-    }, inplace=True)
+    df = df.dropna(subset=["timestamp"])
+    df = df[df["action"].notnull()]
 
-    required_cols = ['user_address', 'event_type', 'amount']
-    for col in required_cols:
-        if col not in df.columns:
-            raise KeyError(f"Required field '{col}' missing after renaming.")
+    grouped = df.groupby("userWallet")
 
-    features = df.groupby('user_address').agg(
-        total_txn=('event_type', 'count'),
-        total_deposit=('amount', lambda x: x[df.loc[x.index, 'event_type'] == 'deposit'].sum()),
-        total_borrow=('amount', lambda x: x[df.loc[x.index, 'event_type'] == 'borrow'].sum()),
-        total_repay=('amount', lambda x: x[df.loc[x.index, 'event_type'] == 'repay'].sum()),
-        total_liquidations=('event_type', lambda x: (x == 'liquidationcall').sum()),
-        avg_amount=('amount', 'mean'),
-        txn_types=('event_type', lambda x: len(set(x)))
-    ).reset_index()
+    features = []
+    for wallet, group in grouped:
+        total_tx = len(group)
+        action_counts = group["action"].value_counts().to_dict()
+        days_active = (group["timestamp"].max() - group["timestamp"].min()).days + 1
+        tx_per_day = total_tx / days_active if days_active > 0 else total_tx
 
-    features['repay_ratio'] = features['total_repay'] / (features['total_borrow'] + 1e-6)
-    features['borrow_deposit_ratio'] = features['total_borrow'] / (features['total_deposit'] + 1e-6)
+        feature = {
+            "wallet": wallet,
+            "total_tx": total_tx,
+            "unique_actions": group["action"].nunique(),
+            "days_active": days_active,
+            "tx_per_day": tx_per_day,
+            "deposits": action_counts.get("deposit", 0),
+            "borrows": action_counts.get("borrow", 0),
+            "repays": action_counts.get("repay", 0),
+            "redeems": action_counts.get("redeemunderlying", 0),
+            "liquidations": action_counts.get("liquidationcall", 0),
+        }
 
-    return features.fillna(0)
+        features.append(feature)
 
-
-def generate_scores(features_df):
-    score_features = ['total_txn', 'total_deposit', 'repay_ratio',
-                      'borrow_deposit_ratio', 'txn_types', 'avg_amount']
-
-    scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(features_df[score_features])
-
-    weights = np.array([0.15, 0.2, 0.25, -0.1, 0.2, 0.1])
-    scores = np.dot(scaled, weights)
-    scores = MinMaxScaler().fit_transform(scores.reshape(-1, 1)).flatten()
-    scores = (scores * 1000).astype(int)
-
-    features_df['score'] = scores
-    return features_df
+    return pd.DataFrame(features)
 
 
-def save_output(df):
-    os.makedirs('output', exist_ok=True)
-    df[['user_address', 'score']].to_csv(OUTPUT_FILE, index=False)
+def train_model(df):
+    df["risk_score"] = (
+        df["deposits"] * 2 +
+        df["repays"] * 3 -
+        df["borrows"] * 1 -
+        df["liquidations"] * 5
+    )
 
-    bins = list(range(0, 1100, 100))
-    plt.figure(figsize=(10, 6))
-    plt.hist(df['score'], bins=bins, color='skyblue', edgecolor='black')
-    plt.title('Wallet Score Distribution')
-    plt.xlabel('Score Range')
-    plt.ylabel('Number of Wallets')
-    plt.grid(True)
-    plt.savefig(PLOT_FILE)
-    plt.close()
+    X = df[["total_tx", "unique_actions", "days_active", "tx_per_day",
+            "deposits", "borrows", "repays", "redeems", "liquidations"]]
+    y = df["risk_score"]
+
+    model = RandomForestRegressor(n_estimators=100, random_state=42)
+    model.fit(X, y)
+
+    pred = model.predict(X)
+    scaler = MinMaxScaler(feature_range=(0, 1000))
+    df["credit_score"] = scaler.fit_transform(pred.reshape(-1, 1)).round(2)
+
+    return df[["wallet", "credit_score"]], model
 
 
 def main():
     print("Loading data...")
-    df = load_data(INPUT_FILE)
+    with open("data/sample_transactions.json") as f:
+        raw_data = json.load(f)
+
+    df = pd.DataFrame(raw_data)
+    print(f"Sample keys in first record: {df.iloc[0].keys()}")
 
     print("Engineering features...")
     features_df = engineer_features(df)
 
-    print("Generating scores...")
-    final_df = generate_scores(features_df)
+    print("Training and scoring...")
+    scored_wallets, model = train_model(features_df)
 
-    print("Saving results...")
-    save_output(final_df)
+    os.makedirs("outputs", exist_ok=True)
+    scored_wallets.to_csv("outputs/wallet_scores.csv", index=False)
+    print("Saved wallet scores to outputs/wallet_scores.csv")
 
-    print("Done!")
+    print("Generating score distribution graph...")
+    plot_score_distribution(scored_wallets["credit_score"])
 
+def plot_score_distribution(scores):
+    bins = list(range(0, 1100, 100))
+    plt.hist(scores, bins=bins, edgecolor="black", color="#4CAF50")
+    plt.xlabel("Credit Score")
+    plt.ylabel("Number of Wallets")
+    plt.title("Wallet Credit Score Distribution")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig("outputs/score_distribution.png")
+    print("Saved score distribution plot to outputs/score_distribution.png")
 
 if __name__ == "__main__":
     main()
